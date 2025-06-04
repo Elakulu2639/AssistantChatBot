@@ -12,7 +12,7 @@ namespace ChatBot.Server.Models
 
     public class ChatResponse
     {
-        public string Response { get; set; }
+        public string? Response { get; set; }
         public string Category { get; set; }
         public double Confidence { get; set; }
     }
