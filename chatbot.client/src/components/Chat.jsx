@@ -51,7 +51,11 @@ function Chat() {
             }
 
             const data = await response.json();
-            const botMsg = { from: 'bot', text: data.response, timestamp: new Date() };
+            if (!data.success) {
+                throw new Error(data.message || 'Failed to get response');
+            }
+
+            const botMsg = { from: 'bot', text: data.data, timestamp: new Date() };
             setMessages((prev) => [...prev, botMsg]);
         } catch (error) {
             console.error('Error:', error);

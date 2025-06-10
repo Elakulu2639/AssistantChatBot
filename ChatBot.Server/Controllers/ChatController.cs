@@ -1,6 +1,8 @@
+using Microsoft.AspNetCore.Mvc;
 using ChatBot.Server.Models;
 using ChatBot.Server.Services;
-using Microsoft.AspNetCore.Mvc;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace ChatBot.Server.Controllers
 {
@@ -9,33 +11,44 @@ namespace ChatBot.Server.Controllers
     public class ChatController : ControllerBase
     {
         private readonly IChatModelService _chatModelService;
+        private readonly ILogger<ChatController> _logger;
 
-        public ChatController(IChatModelService chatModelService)
+        public ChatController(IChatModelService chatModelService, ILogger<ChatController> logger)
         {
             _chatModelService = chatModelService;
-        }
-
-        public class ChatRequest
-        {
-            public string UserMessage { get; set; } = string.Empty;
+            _logger = logger;
         }
 
         [HttpPost]
-        public async Task<IActionResult> SendMessage([FromBody] ChatRequest request)
+        public async Task<IActionResult> SendMessage([FromBody] ChatMessage message)
         {
-            if (string.IsNullOrWhiteSpace(request.UserMessage))
-            {
-                return BadRequest(new { response = "User message cannot be empty." });
-            }
-
             try
             {
-                var result = await _chatModelService.GetChatResponseAsync(request.UserMessage);
-                return Ok(new ChatResponse { Response = result });
+                _logger.LogInformation("Received message: {Message}", message.UserMessage);
+
+                if (string.IsNullOrWhiteSpace(message.UserMessage))
+                {
+                    return BadRequest(ApiResponse<string>.CreateError("Message cannot be empty", new[] { "Message is required" }));
+                }
+
+                var response = await _chatModelService.GetChatResponseAsync(message.UserMessage);
+
+                _logger.LogInformation("Generated response: {Response}", response);
+
+                if (string.IsNullOrWhiteSpace(response))
+                {
+                    return Ok(ApiResponse<string>.CreateError("No response generated", new[] { "Could not generate a response" }));
+                }
+
+                return Ok(ApiResponse<string>.CreateSuccess(response, "Message processed successfully"));
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new ChatResponse { Response = $"Error: {ex.Message}" });
+                _logger.LogError(ex, "Error processing message: {Message}", message.UserMessage);
+                return StatusCode(500, ApiResponse<string>.CreateError(
+                    "I apologize, but I encountered an error while processing your message. Please try again in a moment.",
+                    new[] { ex.Message }
+                ));
             }
         }
     }
