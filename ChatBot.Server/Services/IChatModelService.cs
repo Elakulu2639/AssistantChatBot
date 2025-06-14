@@ -4,6 +4,6 @@ namespace ChatBot.Server.Services
 {
     public interface IChatModelService
     {
-        Task<string> GetChatResponseAsync(string userMessage);
+        Task<string> GetChatResponseAsync(string userMessage, string? sessionId);
     }
 }

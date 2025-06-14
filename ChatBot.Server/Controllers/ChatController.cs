@@ -31,7 +31,10 @@ namespace ChatBot.Server.Controllers
                     return BadRequest(ApiResponse<string>.CreateError("Message cannot be empty", new[] { "Message is required" }));
                 }
 
-                var response = await _chatModelService.GetChatResponseAsync(message.UserMessage);
+                // Generate a new session ID if it's the start of a new conversation
+                var sessionId = string.IsNullOrEmpty(message.SessionId) ? Guid.NewGuid().ToString() : message.SessionId;
+
+                var response = await _chatModelService.GetChatResponseAsync(message.UserMessage, sessionId);
 
                 _logger.LogInformation("Generated response: {Response}", response);
 
@@ -40,7 +43,14 @@ namespace ChatBot.Server.Controllers
                     return Ok(ApiResponse<string>.CreateError("No response generated", new[] { "Could not generate a response" }));
                 }
 
-                return Ok(ApiResponse<string>.CreateSuccess(response, "Message processed successfully"));
+                // Include the sessionId in the response
+                return Ok(new ApiResponse<object>
+                {
+                    Success = true,
+                    Message = "Message processed successfully",
+                    Data = response,
+                    SessionId = sessionId
+                });
             }
             catch (Exception ex)
             {

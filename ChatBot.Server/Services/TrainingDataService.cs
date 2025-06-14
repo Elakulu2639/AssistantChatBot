@@ -1,5 +1,4 @@
-﻿using System.Formats.Asn1;
-using System.Globalization;
+﻿using System.Globalization;
 using CsvHelper;
 using CsvHelper.Configuration;
 using FuzzySharp;
@@ -27,7 +26,7 @@ namespace ChatBot.Server.Services
                     MissingFieldFound = null
                 };
 
-                using var reader = new StreamReader("Data/erp_case_data_large.csv");
+                using var reader = new StreamReader("Data/erp_case_data_expanded.csv");
                 using var csv = new CsvReader(reader, config);
 
                 return csv.GetRecords<TrainingData>().ToList();
@@ -41,44 +40,45 @@ namespace ChatBot.Server.Services
 
         public string GetResponseForQuery(string userMessage)
         {
-            var normalizedMessage = userMessage.ToLower();
+            var normalizedMessage = userMessage.ToLower().Trim();
+            _logger.LogInformation("Normalized user message: {NormalizedMessage}", normalizedMessage);
 
-            // Find exact match first
-            var exactMatch = _trainingData.FirstOrDefault(t =>
-                t.Question.ToLower() == normalizedMessage);
-
-            if (exactMatch != null)
-            {
-                _logger.LogInformation("Found exact match for query: {Query}", userMessage);
-                return exactMatch.Answer;
-            }
-
-            // Find best match using fuzzy matching
+            // Find best match using fuzzy matching, specifically prioritizing exact matches
             var bestMatch = _trainingData
-                .Select(t => new
+                .Select(t =>
                 {
-                    Data = t,
-                    QuestionScore = Fuzz.Ratio(normalizedMessage, t.Question.ToLower()),
-                    KeywordScore = CalculateKeywordScore(normalizedMessage, t),
-                    PartialMatchScore = CalculatePartialMatchScore(normalizedMessage, t.Question.ToLower())
+                    var trainingQuestionNormalized = t.Question.ToLower().Trim();
+                    var score = Fuzz.Ratio(normalizedMessage, trainingQuestionNormalized);
+                    _logger.LogDebug("Comparing '{UserMessage}' with '{TrainingQuestion}' - Score: {Score}",
+                                   normalizedMessage, trainingQuestionNormalized, score);
+                    return new
+                    {
+                        Data = t,
+                        QuestionMatchScore = score,
+                    };
                 })
-                .Select(x => new
-                {
-                    Data = x.Data,
-                    Score = Math.Max(x.QuestionScore, Math.Max(x.KeywordScore, x.PartialMatchScore))
-                })
-                .OrderByDescending(x => x.Score)
+                .OrderByDescending(x => x.QuestionMatchScore) // Order by the question match score
                 .FirstOrDefault();
 
-            if (bestMatch?.Score >= 70) // Threshold for considering it a match
+            // If an exact match (Fuzz.Ratio == 100) is found, return its answer immediately
+            if (bestMatch?.QuestionMatchScore == 100)
             {
-                _logger.LogInformation("Found fuzzy match for query: {Query} with score: {Score}",
-                    userMessage, bestMatch.Score);
+                _logger.LogInformation("Found exact Fuzz.Ratio match for query: {Query} - Answer: {Answer}",
+                    userMessage, bestMatch.Data.Answer);
                 return bestMatch.Data.Answer;
             }
 
+            // If no exact match, proceed with a high threshold for very similar matches
+            if (bestMatch?.QuestionMatchScore >= 85) // Adjusted threshold for very close matches
+            {
+                _logger.LogInformation("Found very high fuzzy match for query: {Query} with score: {Score} - Answer: {Answer}",
+                    userMessage, bestMatch.QuestionMatchScore, bestMatch.Data.Answer);
+                return bestMatch.Data.Answer;
+            }
+
+            // Fallback if no strong match is found
             _logger.LogInformation("No good match found for query: {Query}", userMessage);
-            return null; // No good match found
+            return null;
         }
 
         private double CalculateKeywordScore(string userMessage, TrainingData trainingData)
@@ -121,5 +121,6 @@ namespace ChatBot.Server.Services
         public string Answer { get; set; }
         public string Category { get; set; }
         public string Keywords { get; set; }
+        public string Entities { get; set; }
     }
 }

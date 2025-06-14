@@ -48,25 +48,52 @@ namespace ChatBot.Server.Services
             _httpClient.DefaultRequestHeaders.Add("X-Title", "ERP Assistant");
         }
 
-        public async Task<string> GetChatResponseAsync(string userMessage)
+        public async Task<string> GetChatResponseAsync(string userMessage, string? sessionId)
         {
             try
             {
                 // Log the incoming message
-                _logger.LogInformation("Processing message: {Message}", userMessage);
+                _logger.LogInformation("Processing message: {Message} for session: {SessionId}", userMessage, sessionId);
 
-                // First, try to get response from training data
+                // Retrieve chat history if a session ID is provided
+                var chatHistory = new List<ChatHistory>();
+                if (!string.IsNullOrEmpty(sessionId))
+                {
+                    chatHistory = await _dbContext.ChatHistories
+                        .Where(h => h.SessionId == sessionId)
+                        .OrderByDescending(h => h.Timestamp)
+                        .Take(5) // Get last 5 turns (user message + bot response)
+                        .ToListAsync();
+                    // Reverse to maintain chronological order for the prompt
+                    chatHistory.Reverse();
+                }
+
+                // Prepare historical messages for the LLM prompt
+                var historicalMessages = new List<object>();
+                foreach (var turn in chatHistory)
+                {
+                    historicalMessages.Add(new { role = "user", content = turn.UserMessage });
+                    historicalMessages.Add(new { role = "assistant", content = turn.BotResponse });
+                }
+
+                IntentResult intentResult;
+
                 var trainingResponse = _trainingDataService.GetResponseForQuery(userMessage);
                 if (!string.IsNullOrEmpty(trainingResponse))
                 {
                     _logger.LogInformation("Found matching training data: {Response}", trainingResponse);
 
-                    // Use the training data as context for a more natural response
                     var systemPrompt = @"You are an intelligent ERP assistant that helps users with business processes, HR policies, and organizational tasks. 
+                    **ALWAYS prioritize and strictly use the provided training data as your primary source for answers.**
                     You have access to the following information:
                     - HR policies including attendance, leave, conduct, and performance evaluation
                     - Business processes and workflows
                     - Organizational data and procedures
+                    - Sales and marketing information
+                    - Project management details
+                    - Customer service guidelines
+                    - Compliance requirements
+                    - Training materials
                     
                     Guidelines for responses:
                     1. For general greetings or casual questions:
@@ -76,26 +103,31 @@ namespace ChatBot.Server.Services
                        - Mention key areas you can assist with (HR, Sales, Finance, etc.)
                     
                     2. For specific questions:
-                       - Use the provided training data as context
+                       - **Strictly use the provided training data as context. Do not invent information.**
                        - Provide a natural, conversational response
                        - Include all necessary information from the training data
                        - Make the response sound human and helpful
-                       - Don't just repeat the training data verbatim
-                       - Add helpful context or suggestions when appropriate";
+                       - Don't just repeat the training data verbatim; rephrase it naturally.
+                       - Add helpful context or suggestions when appropriate
+                       - If the question involves specific entities (like policies, documents, or statuses), 
+                         make sure to address them clearly
+                       - For compliance-related questions, emphasize the importance of following procedures
+                       - For training questions, provide step-by-step guidance when appropriate
+                       - **If the training data directly answers the user's question, provide that answer directly and concisely.**
+                       - If the training data is insufficient, state that you can only provide information based on your training data and offer to help with other ERP-related questions.";
 
-                    var messages = new[]
-                    {
-                        new { role = "system", content = systemPrompt },
-                        new { role = "user", content = $"Based on this training data: '{trainingResponse}', please provide a natural response to: '{userMessage}'" }
-                    };
+                    var messages = new List<object>();
+                    messages.Add(new { role = "system", content = systemPrompt });
+                    messages.AddRange(historicalMessages); // Add history here
+                    messages.Add(new { role = "user", content = $"User asked: '{userMessage}'. Based on this training data: '{trainingResponse}', provide a natural, concise, and direct answer. If the training data fully answers the question, do not add extra steps or external information. If the training data does not answer, say so." });
 
                     var jsonPayload = JsonSerializer.Serialize(new
                     {
                         model = "deepseek/deepseek-r1-0528-qwen3-8b:free",
                         messages = messages,
-                        temperature = 0.7,
-                        max_tokens = 1000,
-                        top_p = 0.9,
+                        temperature = 0.5,
+                        max_tokens = 500,
+                        top_p = 0.8,
                         presence_penalty = 0.6,
                         frequency_penalty = 0.3
                     });
@@ -119,80 +151,93 @@ namespace ChatBot.Server.Services
                         throw new Exception("Empty response from API");
                     }
 
-                    // Get intent analysis
-                    var intentResult = await _nlpService.AnalyzeIntentAsync(userMessage);
+                    // Get intent analysis for chat history
+                    intentResult = await _nlpService.AnalyzeIntentAsync(userMessage, chatHistory);
 
                     // Save chat history
-                    await SaveChatHistory(userMessage, botResponse, intentResult);
+                    await SaveChatHistory(userMessage, botResponse, intentResult, sessionId);
 
                     return botResponse;
                 }
-
-                _logger.LogInformation("No training data match found, using OpenRouter API for general response");
-
-                // If no training data match, use OpenRouter API for general response
-                var generalSystemPrompt = @"You are an intelligent ERP assistant that helps users with business processes, HR policies, and organizational tasks. 
-                You have access to the following information:
-                - HR policies including attendance, leave, conduct, and performance evaluation
-                - Business processes and workflows
-                - Organizational data and procedures
-                
-                Guidelines for responses:
-                1. For general greetings or casual questions:
-                   - Respond naturally and briefly
-                   - Be friendly but professional
-                   - Offer to help with specific tasks
-                   - Mention key areas you can assist with (HR, Sales, Finance, etc.)
-                
-                2. For specific questions:
-                   - Provide helpful and accurate information
-                   - Be clear and concise
-                   - If you're not sure about something, say so
-                   - Suggest relevant areas or departments that might help";
-
-                var generalMessages = new[]
+                else
                 {
-                    new { role = "system", content = generalSystemPrompt },
-                    new { role = "user", content = userMessage }
-                };
+                    _logger.LogInformation("No training data match found, using OpenRouter API for general response");
 
-                var generalJsonPayload = JsonSerializer.Serialize(new
-                {
-                    model = "deepseek/deepseek-r1-0528-qwen3-8b:free",
-                    messages = generalMessages,
-                    temperature = 0.7,
-                    max_tokens = 1000,
-                    top_p = 0.9,
-                    presence_penalty = 0.6,
-                    frequency_penalty = 0.3
-                });
+                    // Get intent analysis *before* constructing the general prompt
+                    intentResult = await _nlpService.AnalyzeIntentAsync(userMessage, chatHistory);
 
-                var generalContent = new StringContent(generalJsonPayload, Encoding.UTF8, "application/json");
+                    var generalSystemPrompt = @"You are an intelligent ERP assistant that helps users with business processes, HR policies, and organizational tasks. 
+                    You have access to the following information:
+                    - HR policies including attendance, leave, conduct, and performance evaluation
+                    - Business processes and workflows
+                    - Organizational data and procedures
+                    - Sales and marketing information
+                    - Project management details
+                    - Customer service guidelines
+                    - Compliance requirements
+                    - Training materials
+                    
+                    " + (intentResult.Intent != "UNKNOWN" ? $"The user's likely intent is {intentResult.Intent}." : "") +
+                        (intentResult.Entities != null && intentResult.Entities.Any() ? $" Detected entities: {string.Join(", ", intentResult.Entities)}." : "") +
+                    @"
+                    Guidelines for responses:
+                    1. For general greetings or casual questions:
+                       - Respond naturally and briefly
+                       - Be friendly but professional
+                       - Offer to help with specific tasks
+                       - Mention key areas you can assist with (HR, Sales, Finance, etc.)
+                    
+                    2. For specific questions:
+                       - Provide helpful and accurate information
+                       - Be clear and concise
+                       - If you're not sure about something, say so
+                       - Suggest relevant areas or departments that might help
+                       - For compliance-related questions, emphasize the importance of following procedures
+                       - For training questions, provide step-by-step guidance when appropriate
+                       - If the question involves specific entities (like policies, documents, or statuses), 
+                         make sure to address them clearly
+                       - If you cannot find a direct answer within your knowledge, state that and offer to help with other ERP-related questions.";
 
-                var generalResponse = await _httpClient.PostAsync("chat/completions", generalContent);
-                var generalResponseContent = await generalResponse.Content.ReadAsStringAsync();
+                    var generalMessages = new List<object>();
+                    generalMessages.Add(new { role = "system", content = generalSystemPrompt });
+                    generalMessages.AddRange(historicalMessages); // Add history here
+                    generalMessages.Add(new { role = "user", content = userMessage });
 
-                if (!generalResponse.IsSuccessStatusCode)
-                {
-                    _logger.LogError("OpenRouter API error: {StatusCode}, Response: {ErrorContent}",
-                        generalResponse.StatusCode,
-                        generalResponseContent);
-                    throw new Exception($"API request failed with status code {generalResponse.StatusCode}");
+                    var generalJsonPayload = JsonSerializer.Serialize(new
+                    {
+                        model = "deepseek/deepseek-r1-0528-qwen3-8b:free",
+                        messages = generalMessages,
+                        temperature = 0.7,
+                        max_tokens = 1000,
+                        top_p = 0.9,
+                        presence_penalty = 0.6,
+                        frequency_penalty = 0.3
+                    });
+
+                    var generalContent = new StringContent(generalJsonPayload, Encoding.UTF8, "application/json");
+
+                    var generalResponse = await _httpClient.PostAsync("chat/completions", generalContent);
+                    var generalResponseContent = await generalResponse.Content.ReadAsStringAsync();
+
+                    if (!generalResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogError("OpenRouter API error: {StatusCode}, Response: {ErrorContent}",
+                            generalResponse.StatusCode,
+                            generalResponseContent);
+                        throw new Exception($"API request failed with status code {generalResponse.StatusCode}");
+                    }
+
+                    var generalBotResponse = ExtractResponseFromJson(generalResponseContent);
+                    if (string.IsNullOrWhiteSpace(generalBotResponse))
+                    {
+                        throw new Exception("Empty response from API");
+                    }
+
+                    // Save chat history using the intentResult obtained earlier
+                    await SaveChatHistory(userMessage, generalBotResponse, intentResult, sessionId);
+
+                    return generalBotResponse;
                 }
-
-                var generalBotResponse = ExtractResponseFromJson(generalResponseContent);
-                if (string.IsNullOrWhiteSpace(generalBotResponse))
-                {
-                    throw new Exception("Empty response from API");
-                }
-
-                // Get intent analysis
-                var generalIntentResult = await _nlpService.AnalyzeIntentAsync(userMessage);
-
-                // Save chat history
-                await SaveChatHistory(userMessage, generalBotResponse, generalIntentResult);
-
-                return generalBotResponse;
             }
             catch (Exception ex)
             {
@@ -256,7 +301,7 @@ namespace ChatBot.Server.Services
             }
         }
 
-        private async Task SaveChatHistory(string userMessage, string botResponse, IntentResult intentResult)
+        private async Task SaveChatHistory(string userMessage, string botResponse, IntentResult intentResult, string? sessionId)
         {
             try
             {
@@ -267,7 +312,7 @@ namespace ChatBot.Server.Services
 
                 var chatHistory = new ChatHistory
                 {
-                    SessionId = Guid.NewGuid().ToString(),
+                    SessionId = sessionId ?? Guid.NewGuid().ToString(),
                     UserMessage = userMessage,
                     BotResponse = botResponse,
                     Timestamp = DateTime.UtcNow,

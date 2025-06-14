@@ -6,6 +6,7 @@ function Chat() {
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const [darkMode, setDarkMode] = useState(false);
+    const [sessionId, setSessionId] = useState(null);
     const chatBoxRef = useRef(null);
 
     // Scroll to bottom when messages change
@@ -24,6 +25,7 @@ function Chat() {
         setMessages([]);
         setInput('');
         setIsTyping(false);
+        setSessionId(null); // Clear the session ID when restarting chat
     };
 
     const sendMessage = async () => {
@@ -42,7 +44,10 @@ function Chat() {
                     'Accept': 'application/json'
                 },
                 credentials: 'include',
-                body: JSON.stringify({ userMessage: input }),
+                body: JSON.stringify({
+                    userMessage: input,
+                    sessionId: sessionId // Include sessionId in the request
+                }),
             });
 
             if (!response.ok) {
@@ -53,6 +58,11 @@ function Chat() {
             const data = await response.json();
             if (!data.success) {
                 throw new Error(data.message || 'Failed to get response');
+            }
+
+            // Store the sessionId from the first response
+            if (!sessionId && data.sessionId) {
+                setSessionId(data.sessionId);
             }
 
             const botMsg = { from: 'bot', text: data.data, timestamp: new Date() };

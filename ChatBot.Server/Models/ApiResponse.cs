@@ -3,29 +3,28 @@
     public class ApiResponse<T>
     {
         public bool Success { get; set; }
-        public string? Message { get; set; }
-        public T? Data { get; set; }
-        public string[] Errors { get; set; } = Array.Empty<string>();
+        public string Message { get; set; }
+        public T Data { get; set; }
+        public string[] Errors { get; set; }
+        public string SessionId { get; set; }
 
-        public static ApiResponse<T> CreateSuccess(T data, string? message = null)
+        public static ApiResponse<T> CreateSuccess(T data, string message = "Success")
         {
             return new ApiResponse<T>
             {
                 Success = true,
                 Message = message,
-                Data = data,
-                Errors = Array.Empty<string>()
+                Data = data
             };
         }
 
-        public static ApiResponse<T> CreateError(string message, string[]? errors = null)
+        public static ApiResponse<T> CreateError(string message, string[] errors = null)
         {
             return new ApiResponse<T>
             {
                 Success = false,
                 Message = message,
-                Data = default,
-                Errors = errors ?? Array.Empty<string>()
+                Errors = errors
             };
         }
     }
